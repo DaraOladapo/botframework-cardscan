@@ -1,85 +1,70 @@
-﻿using System;
-using System.Linq;
+﻿using Microsoft.Bot.Connector;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
-using System.Threading.Tasks;
-using System.Web.Http;
-using System.Web.Http.Description;
-using Microsoft.Bot.Connector;
-using Newtonsoft.Json;
-using System.Text;
-using System.Web;
 using System.Net.Http.Headers;
-using Newtonsoft.Json.Linq;
-using System.Collections.Generic;
-using System.Text.RegularExpressions;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web;
+using System.Web.Http;
 
 namespace Cardscan
 {
     [BotAuthentication]
     public class MessagesController : ApiController
     {
-        /// <summary>
-        /// POST: api/Messages
-        /// Receive a message from a user and reply to it
-        /// </summary>
         public async Task<HttpResponseMessage> Post([FromBody]Activity activity)
         {
-            ConnectorClient connector = new ConnectorClient(new Uri(activity.ServiceUrl));
-            //Activity reply = activity.CreateReply($"i habe been called");
-            //await connector.Conversations.ReplyToActivityAsync(reply);
+            var connector = new ConnectorClient(new Uri(activity.ServiceUrl));
 
             if (activity.Attachments.Count > 0)
             {
                 var attachment = activity.Attachments[0];
-                var x = activity.CreateReply($"{attachment.ContentUrl}");
-                await connector.Conversations.ReplyToActivityAsync(x);
 
-                // query cognitive services vision
-                var client = new HttpClient();
-                var queryString = HttpUtility.ParseQueryString(string.Empty);
+                var byteData = await DownloadAttachentFromSkype(connector, attachment);
+                var computerVisionResult = await ExecuteComputerVision(activity, connector, byteData);
 
-                // Request headers
-                client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", "");
+                var reply = activity.CreateReply($"Ok, I think the email is {computerVisionResult.Email}");
 
-                // Request parameters
-                queryString["language"] = "unk";
-                queryString["detectOrientation"] = "true";
-                var uri = "https://api.projectoxford.ai/vision/v1.0/ocr?" + queryString;
-
-                // Request body
-                //https://scontent.xx.fbcdn.net/v/t35.0-12/16129708_10154245705797083_1623964492_o.jpg?_nc_ad=z-m&oh=924386164bd9edb18622e9b0f80e5ac8&oe=587EED1D
-                var byteData = Encoding.UTF8.GetBytes($"{{\"url\":\"{attachment.ContentUrl}\"}}");
-                //var byteData = Encoding.UTF8.GetBytes($"{{\"url\":\"https://scontent.xx.fbcdn.net/v/t35.0-12/16129708_10154245705797083_1623964492_o.jpg?_nc_ad=z-m&oh=924386164bd9edb18622e9b0f80e5ac8&oe=587EED1D\"}}");
-
-                using (var content = new ByteArrayContent(byteData))
-                {
-                    content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-                    var visionResponse = await client.PostAsync(uri, content);
-                    var visionResponseContent = visionResponse.Content.ReadAsStringAsync().Result;
-
-                    // jpath stuff
-                    var lines = ExtractRecognisedText(visionResponseContent);
-
-
-                    //
-
-                    var reply = activity.CreateReply($"Ok, I think the email is {lines.Email}");
-                    await connector.Conversations.ReplyToActivityAsync(reply);
-                }
-                
-                //reply = activity.CreateReply($"{attachment.ContentUrl}");
-                //await connector.Conversations.ReplyToActivityAsync(reply);
+                await connector.Conversations.ReplyToActivityAsync(reply);
             }
-
+            
             var response = Request.CreateResponse(HttpStatusCode.OK);
             return response;
+        }
+
+        private static async Task<RecognisedInformation> ExecuteComputerVision(Activity activity, ConnectorClient connector, byte[] byteData)
+        {
+            var client = new HttpClient();
+            var queryString = HttpUtility.ParseQueryString(string.Empty);
+            var cognitiveServicesVisionKey = System.Configuration.ConfigurationManager.AppSettings["CognitiveServicesVisionKey"]; ;
+            client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", cognitiveServicesVisionKey);
+            queryString["language"] = "unk";
+            queryString["detectOrientation"] = "true";
+            var uri = "https://api.projectoxford.ai/vision/v1.0/ocr?" + queryString;
+            var content = new ByteArrayContent(byteData);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            var visionResponse = await client.PostAsync(uri, content);
+            var visionResponseContent = visionResponse.Content.ReadAsStringAsync().Result;
+            return ExtractRecognisedText(visionResponseContent);
+        }
+
+        private static async Task<byte[]> DownloadAttachentFromSkype(ConnectorClient connector, Attachment attachment)
+        {
+            using (var httpClient = new HttpClient())
+            {
+                var token = await (connector.Credentials as MicrosoftAppCredentials).GetTokenAsync();
+                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream"));
+                return await httpClient.GetByteArrayAsync(attachment.ContentUrl);
+            }
         }
 
         private static RecognisedInformation ExtractRecognisedText(string visionResponseContent)
         {
             var result = new RecognisedInformation() { Lines = new List<string>() };
-            
             var visionResponseContentParsed = JObject.Parse(visionResponseContent);
             var regions = visionResponseContentParsed.SelectToken("$..regions");
             foreach (var region in regions)
